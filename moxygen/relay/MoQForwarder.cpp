@@ -6,6 +6,7 @@
 
 #include "moxygen/relay/MoQForwarder.h"
 #include <folly/logging/xlog.h>
+#include "moxygen/MoQTrace.h"
 #include "moxygen/MoQTrackProperties.h"
 
 namespace moxygen {
@@ -673,6 +674,14 @@ Payload MoQForwarder::maybeClone(const Payload& payload) {
   return payload ? payload->clone() : nullptr;
 }
 
+Payload MoQForwarder::cloneForSubscriber(const Payload& payload) {
+#if defined(MOXYGEN_MOQ_TRACE)
+  return trace::tracedClone(payload, &MoQForwarder::maybeClone);
+#else
+  return maybeClone(payload);
+#endif
+}
+
 // MoQForwarder::Subscriber implementation
 
 MoQForwarder::Subscriber::Subscriber(
@@ -945,11 +954,15 @@ MoQForwarder::SubgroupForwarder::object(
       [&](const std::shared_ptr<Subscriber>& sub,
           const std::shared_ptr<SubgroupConsumer>& subgroupConsumer) {
         subgroupConsumer
-            ->object(objectID, maybeClone(payload), extensions, finSubgroup)
+            ->object(
+                objectID, cloneForSubscriber(payload), extensions, finSubgroup)
             .onError([this, sub](const auto& err) {
               forwarder_->handleSubgroupError(
                   *sub, identifier_, err, "SubgroupForwarder::object");
             });
+#if defined(MOXYGEN_MOQ_TRACE)
+        trace::pendingClone.reset();
+#endif
         if (finSubgroup) {
           closeSubgroupForSubscriber(sub, "SubgroupForwarder::object");
         }
@@ -988,11 +1001,17 @@ MoQForwarder::SubgroupForwarder::beginObject(
           const std::shared_ptr<SubgroupConsumer>& subgroupConsumer) {
         subgroupConsumer
             ->beginObject(
-                objectID, length, maybeClone(initialPayload), extensions)
+                objectID,
+                length,
+                cloneForSubscriber(initialPayload),
+                extensions)
             .onError([this, sub](const auto& err) {
               forwarder_->handleSubgroupError(
                   *sub, identifier_, err, "SubgroupForwarder::beginObject");
             });
+#if defined(MOXYGEN_MOQ_TRACE)
+        trace::pendingClone.reset();
+#endif
       },
       /*makeNew=*/true,
       "SubgroupForwarder::beginObject",
@@ -1108,11 +1127,15 @@ MoQForwarder::SubgroupForwarder::objectPayload(
       [&](const std::shared_ptr<Subscriber>& sub,
           const std::shared_ptr<SubgroupConsumer>& subgroupConsumer) {
         XCHECK(subgroupConsumer);
-        subgroupConsumer->objectPayload(maybeClone(payload), finSubgroup)
+        subgroupConsumer
+            ->objectPayload(cloneForSubscriber(payload), finSubgroup)
             .onError([this, sub](const auto& err) {
               forwarder_->handleSubgroupError(
                   *sub, identifier_, err, "SubgroupForwarder::objectPayload");
             });
+#if defined(MOXYGEN_MOQ_TRACE)
+        trace::pendingClone.reset();
+#endif
         if (finSubgroup) {
           closeSubgroupForSubscriber(sub, "SubgroupForwarder::objectPayload");
         }

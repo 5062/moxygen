@@ -479,6 +479,20 @@ class StreamPublisherImpl
 
   void onStreamComplete();
 
+#if defined(MOXYGEN_MOQ_TRACE)
+  // Start tracing the copy about to be written, when it forwards the inbound
+  // object this thread is handing to the relay. Call after validatePublish,
+  // which opens the stream.
+  void traceCopyBegin(uint64_t objectID, uint64_t length);
+  // Record the forwarder's clone of a later payload fragment for this copy.
+  void traceFragmentClone();
+  // The copy's write returned. The copy ends once its last byte is written,
+  // or with the first write that failed.
+  void traceCopyDone(bool succeeded, bool cancelled);
+
+  std::optional<moq_trace::Object> traceObject_;
+#endif
+
   std::shared_ptr<MoQSession::PublisherImpl> publisher_{nullptr};
   bool streamComplete_{false};
   std::optional<folly::CancellationCallback> cancelCallback_;
@@ -689,13 +703,30 @@ StreamPublisherImpl::writeCurrentObject(
   header_.extensions = extensions;
   XLOG(DBG6) << "writeCurrentObject sgp=" << this << " objectID=" << objectID;
   bool entireObjectWritten = (!currentLengthRemaining_.has_value());
+#if defined(MOXYGEN_MOQ_TRACE)
+  // Encoding the header also chains the payload behind it without copying.
+  auto headerPhase = traceObject_
+      ? traceObject_->phase(MOQ_TRACE_OBJECT_PHASE_HEADER_ENCODE)
+      : moq_trace::ObjectPhase{};
+#endif
   (void)moqFrameWriter_.writeStreamObject(
       writeBuf_,
       streamType_,
       header_,
       std::move(payload),
       forwardingPreferenceIsDatagram);
+#if defined(MOXYGEN_MOQ_TRACE)
+  headerPhase.finish(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS);
+  auto writePhase = traceObject_
+      ? traceObject_->phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE)
+      : moq_trace::ObjectPhase{};
+#endif
   auto writeResult = writeToStream(finStream, entireObjectWritten);
+#if defined(MOXYGEN_MOQ_TRACE)
+  writePhase.finish(
+      writeResult.hasValue() ? MOQ_TRACE_OBJECT_OUTCOME_SUCCESS
+                             : MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+#endif
   // Only advance the largest once the full object has been written to the wire.
   if (writeResult.hasValue() && entireObjectWritten) {
     publisher_->updateLargest({header_.group, objectID});
@@ -745,8 +776,23 @@ StreamPublisherImpl::writeToStream(bool finStream, bool endObject) {
     }
     refCountForCallbacks_++;
   }
+#if defined(MOXYGEN_MOQ_TRACE)
+  // mvfst only queues the bytes on the stream here. Packets are built and sent
+  // later from its write loop, so this is not the copy's transmission.
+  auto transportCall = traceObject_
+      ? traceObject_->phase(MOQ_TRACE_OBJECT_PHASE_TRANSPORT_CALL)
+      : moq_trace::ObjectPhase{};
+#endif
   auto writeRes = writeHandle->writeStreamData(
       writeBuf_.move(), finStream, deliveryCallback);
+#if defined(MOXYGEN_MOQ_TRACE)
+  transportCall.finish(
+      writeRes.hasValue() ? MOQ_TRACE_OBJECT_OUTCOME_SUCCESS
+                          : MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+  if (traceObject_) {
+    traceObject_->set_stream_offset_end(bytesWritten_);
+  }
+#endif
   if (writeRes.hasValue()) {
     if (finStream) {
       onStreamComplete();
@@ -841,13 +887,22 @@ folly::Expected<folly::Unit, MoQPublishError> StreamPublisherImpl::objectImpl(
     deliveryTimer_->startTimer(objectID, publisher_->getTransportInfo().srtt);
   }
 
-  return writeCurrentObject(
+#if defined(MOXYGEN_MOQ_TRACE)
+  traceCopyBegin(objectID, length);
+#endif
+  auto res = writeCurrentObject(
       objectID,
       length,
       std::move(payload),
       extensions,
       finStream,
       forwardingPreferenceIsDatagram);
+#if defined(MOXYGEN_MOQ_TRACE)
+  traceCopyDone(
+      res.hasValue(),
+      res.hasError() && res.error().code == MoQPublishError::CANCELLED);
+#endif
+  return res;
 }
 
 folly::Expected<folly::Unit, MoQPublishError> StreamPublisherImpl::beginObject(
@@ -879,12 +934,21 @@ folly::Expected<folly::Unit, MoQPublishError> StreamPublisherImpl::beginObject(
     deliveryTimer_->startTimer(objectID, publisher_->getTransportInfo().srtt);
   }
 
-  return writeCurrentObject(
+#if defined(MOXYGEN_MOQ_TRACE)
+  traceCopyBegin(objectID, length);
+#endif
+  auto res = writeCurrentObject(
       objectID,
       length,
       std::move(initialPayload),
       extensions,
       /*finStream=*/false);
+#if defined(MOXYGEN_MOQ_TRACE)
+  traceCopyDone(
+      res.hasValue(),
+      res.hasError() && res.error().code == MoQPublishError::CANCELLED);
+#endif
+  return res;
 }
 
 folly::Expected<ObjectPublishStatus, MoQPublishError>
@@ -903,9 +967,24 @@ StreamPublisherImpl::objectPayload(Payload payload, bool finStream) {
   if (!validateObjectPublishRes) {
     return validateObjectPublishRes;
   }
+#if defined(MOXYGEN_MOQ_TRACE)
+  traceFragmentClone();
+  auto writePhase = traceObject_
+      ? traceObject_->phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE)
+      : moq_trace::ObjectPhase{};
+#endif
   writeBuf_.append(std::move(payload));
   bool entireObjectWritten = (!currentLengthRemaining_.has_value());
   auto writeRes = writeToStream(finStream, entireObjectWritten);
+#if defined(MOXYGEN_MOQ_TRACE)
+  writePhase.finish(
+      writeRes.hasValue() ? MOQ_TRACE_OBJECT_OUTCOME_SUCCESS
+                          : MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+  traceCopyDone(
+      writeRes.hasValue(),
+      writeRes.hasError() &&
+          writeRes.error().code == MoQPublishError::CANCELLED);
+#endif
   if (writeRes.hasValue()) {
     return validateObjectPublishRes.value();
   } else {
@@ -996,6 +1075,15 @@ StreamPublisherImpl::endOfSubgroup() {
 }
 
 void StreamPublisherImpl::reset(ResetStreamErrorCode error) {
+#if defined(MOXYGEN_MOQ_TRACE)
+  if (traceObject_) {
+    traceObject_->finish(
+        error == ResetStreamErrorCode::DELIVERY_TIMEOUT
+            ? MOQ_TRACE_OBJECT_OUTCOME_EXPIRED
+            : MOQ_TRACE_OBJECT_OUTCOME_RESET);
+    traceObject_.reset();
+  }
+#endif
   if (streamComplete_) {
     XLOG(DBG4) << "Reset after streamComplete_ sgp=" << this;
     return;
@@ -1023,6 +1111,64 @@ void StreamPublisherImpl::reset(ResetStreamErrorCode error) {
   }
   onStreamComplete();
 }
+
+#if defined(MOXYGEN_MOQ_TRACE)
+void StreamPublisherImpl::traceCopyBegin(uint64_t objectID, uint64_t length) {
+  const auto clone = std::exchange(trace::pendingClone, std::nullopt);
+  if (traceObject_) {
+    // The previous copy never finished, which validatePublish does not allow.
+    traceObject_->finish(MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+    traceObject_.reset();
+  }
+  const trace::InboundObject* inbound = trace::currentInbound;
+  if (inbound == nullptr || streamType_ == StreamType::FETCH_HEADER ||
+      !writeHandle_ || !trace::objectTraceEnabled()) {
+    return;
+  }
+  const uint64_t startNs = clone ? clone->startNs : quic_trace::now_ns();
+  moq_trace::ObjectContext context;
+  context.logical_id = inbound->logicalId;
+  context.identity =
+      moq_trace::ObjectIdentity{trackAlias_.value, header_.group, objectID};
+  context.direction = QUIC_TRACE_DIRECTION_TX;
+  context.session_id = publisher_->traceSessionId();
+  context.stream_id = writeHandle_->getID();
+  // A new stream's subgroup header is still in writeBuf_ ahead of the object.
+  context.stream_offset_start = bytesWritten_ + writeBuf_.chainLength();
+  context.start_ns = startNs;
+  context.payload_bytes = length;
+  traceObject_.emplace(context);
+  // The copy waited from the instant the relay began handing the object to
+  // its consumers until its clone. Fan-out is synchronous, so the wait
+  // includes writing the copies of subscribers served before this one.
+  traceObject_
+      ->phase_at(MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT, inbound->readyNs)
+      .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, startNs);
+  if (clone) {
+    traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_CLONE, clone->startNs)
+        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, clone->endNs);
+  }
+}
+
+void StreamPublisherImpl::traceFragmentClone() {
+  const auto clone = std::exchange(trace::pendingClone, std::nullopt);
+  if (traceObject_ && clone) {
+    traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_CLONE, clone->startNs)
+        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, clone->endNs);
+  }
+}
+
+void StreamPublisherImpl::traceCopyDone(bool succeeded, bool cancelled) {
+  if (!traceObject_ || (succeeded && currentLengthRemaining_.has_value())) {
+    return;
+  }
+  traceObject_->finish(
+      succeeded       ? MOQ_TRACE_OBJECT_OUTCOME_SUCCESS
+          : cancelled ? MOQ_TRACE_OBJECT_OUTCOME_RESET
+                      : MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+  traceObject_.reset();
+}
+#endif
 
 folly::Expected<folly::SemiFuture<uint64_t>, MoQPublishError>
 StreamPublisherImpl::awaitReadyToConsume() {
@@ -4001,6 +4147,11 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
       bool objectComplete,
       bool streamComplete,
       bool forwardingPreferenceIsDatagram = false) override {
+#if defined(MOXYGEN_MOQ_TRACE)
+    const auto traceHeader = std::exchange(traceHeader_, std::nullopt);
+    const uint64_t traceEntryNs =
+        traceHeader && !fetchState_ ? quic_trace::now_ns() : 0;
+#endif
     if (isCancelled()) {
       return MoQCodec::ParseResult::ERROR_TERMINATE;
     }
@@ -4030,6 +4181,13 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
       }
     }
 
+#if defined(MOXYGEN_MOQ_TRACE)
+    std::optional<trace::ScopedInboundObject> traceScope;
+    if (traceHeader && !fetchState_) {
+      traceScope.emplace(traceObjectBegin(
+          *traceHeader, traceEntryNs, group, objectID, length));
+    }
+#endif
     folly::Expected<folly::Unit, MoQPublishError> res{folly::unit};
     if (objectComplete) {
       // Handle fetch and subscribe consumers differently due to different
@@ -4065,13 +4223,31 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
           std::move(initialPayload),
           std::move(extensions));
     }
+#if defined(MOXYGEN_MOQ_TRACE)
+    traceFragmentDone(res.hasValue(), objectComplete);
+#endif
     return res ? MoQCodec::ParseResult::CONTINUE
                : MoQCodec::ParseResult::ERROR_TERMINATE;
   }
 
   MoQCodec::ParseResult onObjectPayload(Payload payload, bool objectComplete)
       override {
+#if defined(MOXYGEN_MOQ_TRACE)
+    const auto tracePayloadStartNs =
+        std::exchange(tracePayloadStartNs_, std::nullopt);
+    const uint64_t traceEntryNs =
+        traceObject_ && traceObject_->records_phases() ? quic_trace::now_ns()
+                                                       : 0;
+#endif
     if (isCancelled()) {
+#if defined(MOXYGEN_MOQ_TRACE)
+      // The subscription went away with the object partly forwarded, which
+      // stops its stream.
+      if (traceObject_) {
+        traceObject_->finish(MOQ_TRACE_OBJECT_OUTCOME_RESET);
+        traceObject_.reset();
+      }
+#endif
       return MoQCodec::ParseResult::ERROR_TERMINATE;
     }
 
@@ -4085,6 +4261,13 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
       }
     }
 
+#if defined(MOXYGEN_MOQ_TRACE)
+    std::optional<trace::ScopedInboundObject> traceScope;
+    if (traceObject_) {
+      traceScope.emplace(
+          traceObjectFragment(tracePayloadStartNs, traceEntryNs));
+    }
+#endif
     bool finStream = false;
     // Handle subscription/fetch consumers
     auto res = invokeCallbackNoGroup(
@@ -4092,6 +4275,9 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
         &FetchConsumer::objectPayload,
         std::move(payload),
         finStream);
+#if defined(MOXYGEN_MOQ_TRACE)
+    traceFragmentDone(res.hasValue(), objectComplete);
+#endif
     if (!res) {
       return MoQCodec::ParseResult::ERROR_TERMINATE;
     } else {
@@ -4107,6 +4293,10 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
       uint64_t objectID,
       std::optional<uint8_t> priority,
       ObjectStatus status) override {
+#if defined(MOXYGEN_MOQ_TRACE)
+    // Status objects carry no payload and are not traced.
+    traceHeader_.reset();
+#endif
     if (isCancelled()) {
       return MoQCodec::ParseResult::ERROR_TERMINATE;
     }
@@ -4193,6 +4383,13 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
   // a still-open consumer even if the subscription was cancelled — the
   // MoQConsumers contract requires exactly one terminal callback.
   bool reset(ResetStreamErrorCode error) {
+#if defined(MOXYGEN_MOQ_TRACE)
+    // The stream ended under an object that had not fully arrived.
+    if (traceObject_) {
+      traceObject_->finish(MOQ_TRACE_OBJECT_OUTCOME_RESET);
+      traceObject_.reset();
+    }
+#endif
     if (!subscribeState_ && !fetchState_) {
       return false;
     }
@@ -4209,7 +4406,134 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
     logger_ = logger;
   }
 
+#if defined(MOXYGEN_MOQ_TRACE)
+  // The codec parsing this stream, which reports how far into it parsing has
+  // reached.
+  void setTraceCodec(const MoQObjectStreamCodec* codec) {
+    traceCodec_ = codec;
+  }
+
+  // The read loop received stream bytes and is about to hand them to the
+  // codec. A later payload fragment's read phase starts here.
+  void traceIngress() {
+    if (traceObject_ && traceObject_->records_phases()) {
+      tracePayloadStartNs_ = quic_trace::now_ns();
+    } else {
+      tracePayloadStartNs_.reset();
+    }
+  }
+
+  void onObjectHeaderTrace(
+      uint64_t startNs,
+      uint64_t startOffset,
+      uint64_t endNs,
+      uint64_t endOffset) override {
+    traceHeader_ = TraceHeader{startNs, startOffset, endNs, endOffset};
+  }
+#endif
+
  private:
+#if defined(MOXYGEN_MOQ_TRACE)
+  struct TraceHeader {
+    uint64_t startNs;
+    uint64_t startOffset;
+    uint64_t endNs;
+    uint64_t endOffset;
+  };
+
+  // Start the inbound object whose header was just parsed, and return what its
+  // copies see while the consumer forwards it.
+  //
+  // Payload read runs from the end of the header parse until this callback,
+  // which is the codec splitting the first payload bytes off its buffer.
+  // Create runs from the callback until the consumer call, minus this
+  // bookkeeping, which falls into each copy's delivery wait instead. The
+  // relay stores nothing before forwarding, so the consumer call is where the
+  // object becomes readable.
+  const trace::InboundObject* traceObjectBegin(
+      const TraceHeader& header,
+      uint64_t entryNs,
+      uint64_t group,
+      uint64_t objectID,
+      uint64_t length) {
+    const uint64_t createEndNs = quic_trace::now_ns();
+    if (traceObject_) {
+      // The previous object never completed, which the codec does not allow.
+      traceObject_->finish(MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+      traceObject_.reset();
+    }
+    tracePayloadStartNs_.reset();
+    // One logical group per inbound subgroup, so copies of its objects share
+    // it and count frames in stream order.
+    if (!traceNextLogicalId_) {
+      traceNextLogicalId_ = moq_trace::next_logical_id();
+    }
+    const moq_trace::LogicalId logicalId = *traceNextLogicalId_;
+    ++traceNextLogicalId_->frame;
+
+    moq_trace::ObjectContext context;
+    context.logical_id = logicalId;
+    context.identity =
+        moq_trace::ObjectIdentity{trackAlias_.value, group, objectID};
+    context.direction = QUIC_TRACE_DIRECTION_RX;
+    context.session_id = session_->traceSessionId();
+    context.stream_id = currentStreamId_;
+    context.stream_offset_start = header.startOffset;
+    context.start_ns = header.startNs;
+    context.payload_bytes = length;
+    traceObject_.emplace(context);
+    traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE, header.startNs)
+        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, header.endNs);
+    traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ, header.endNs)
+        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, entryNs);
+    traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_CREATE, entryNs)
+        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, createEndNs);
+    traceObject_->set_stream_offset_end(traceCodec_->streamBytesConsumed());
+    traceInbound_ = trace::InboundObject{logicalId, quic_trace::now_ns()};
+    return &traceInbound_;
+  }
+
+  // Record a later payload fragment of the object in progress. Payload read
+  // runs from the read loop receiving the bytes until this callback, and
+  // frame commit from the callback until the consumer call.
+  const trace::InboundObject* traceObjectFragment(
+      std::optional<uint64_t> payloadStartNs,
+      uint64_t entryNs) {
+    if (entryNs != 0) {
+      const uint64_t commitEndNs = quic_trace::now_ns();
+      if (payloadStartNs) {
+        traceObject_
+            ->phase_at(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ, *payloadStartNs)
+            .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, entryNs);
+      }
+      traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT, entryNs)
+          .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, commitEndNs);
+    }
+    traceObject_->set_stream_offset_end(traceCodec_->streamBytesConsumed());
+    traceInbound_.readyNs = quic_trace::now_ns();
+    return &traceInbound_;
+  }
+
+  // The consumer returned from a fragment. The object ends with its last
+  // fragment, or with the first one the consumer rejected.
+  void traceFragmentDone(bool succeeded, bool objectComplete) {
+    if (!traceObject_ || (succeeded && !objectComplete)) {
+      return;
+    }
+    traceObject_->finish(
+        succeeded ? MOQ_TRACE_OBJECT_OUTCOME_SUCCESS
+                  : MOQ_TRACE_OBJECT_OUTCOME_FAILED);
+    traceObject_.reset();
+  }
+
+  const MoQObjectStreamCodec* traceCodec_{nullptr};
+  std::optional<TraceHeader> traceHeader_;
+  std::optional<uint64_t> tracePayloadStartNs_;
+  std::optional<moq_trace::LogicalId> traceNextLogicalId_;
+  std::optional<moq_trace::Object> traceObject_;
+  trace::InboundObject traceInbound_;
+#endif
+
   bool isCancelled() const {
     if (fetchState_) {
       return !fetchState_->getFetchCallback();
@@ -4360,6 +4684,9 @@ folly::coro::Task<void> MoQSession::dataStreamReadLoop(
   dcb.setCurrentStreamId(id);
   codec.setCallback(&dcb);
   codec.setStreamId(id);
+#if defined(MOXYGEN_MOQ_TRACE)
+  dcb.setTraceCodec(&codec);
+#endif
 
   bool codecBlocked = false;
   while (!token.isCancellationRequested()) {
@@ -4405,6 +4732,11 @@ folly::coro::Task<void> MoQSession::dataStreamReadLoop(
       continue;
     }
 
+#if defined(MOXYGEN_MOQ_TRACE)
+    if (streamData.data) {
+      dcb.traceIngress();
+    }
+#endif
     MoQCodec::ParseResult result = MoQCodec::ParseResult::ERROR_TERMINATE;
     try {
       result = codec.onIngress(std::move(streamData.data), streamData.fin);

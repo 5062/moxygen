@@ -376,6 +376,9 @@ class MoQForwarder : public TrackConsumer {
 
  private:
   static Payload maybeClone(const Payload& payload);
+  // maybeClone for the subscriber about to receive the payload. Traced builds
+  // time it as that copy's clone phase.
+  static Payload cloneForSubscriber(const Payload& payload);
 
   // Helper that checks if both subscribers_ and subgroups_ are empty and
   // fires onEmpty callback if so

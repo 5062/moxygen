@@ -7,6 +7,7 @@
 #pragma once
 
 #include "moxygen/MoQFramer.h"
+#include "moxygen/MoQTrace.h"
 
 #include <deque>
 
@@ -59,6 +60,11 @@ class MoQCodec {
 
   uint64_t streamId_{std::numeric_limits<uint64_t>::max()};
   folly::IOBufQueue ingress_{folly::IOBufQueue::cacheChainLength()};
+#if defined(MOXYGEN_MOQ_TRACE)
+  // Every byte appended to ingress_. Bytes parsed so far are this minus what
+  // ingress_ still holds, plus any parsed bytes not yet trimmed from it.
+  uint64_t ingestedBytes_{0};
+#endif
 
   std::optional<ErrorCode> connError_;
   std::optional<uint64_t> negotiatedVersion_;
@@ -391,6 +397,22 @@ class MoQObjectStreamCodec : public MoQCodec {
         uint64_t objectId,
         bool isUnknownOrNonexistent) = 0;
     virtual void onEndOfStream() = 0;
+#if defined(MOXYGEN_MOQ_TRACE)
+    // Whether to time object headers for onObjectHeaderTrace. By default only
+    // while a trace session records object events, so the codec reads no
+    // clock otherwise.
+    virtual bool traceObjectHeaders() const {
+      return trace::objectTraceEnabled();
+    }
+    // A subgroup object header was parsed, immediately before onObjectBegin or
+    // onObjectStatus for it. The offsets are the header's half-open range on
+    // the stream, and the times bound the successful parse on the trace clock.
+    virtual void onObjectHeaderTrace(
+        uint64_t /*startNs*/,
+        uint64_t /*startOffset*/,
+        uint64_t /*endNs*/,
+        uint64_t /*endOffset*/) {}
+#endif
   };
 
   MoQObjectStreamCodec(ObjectCallback* callback) : callback_(callback) {}
@@ -408,6 +430,14 @@ class MoQObjectStreamCodec : public MoQCodec {
   bool hasBufferedIngress() const {
     return ingress_.chainLength() > 0;
   }
+
+#if defined(MOXYGEN_MOQ_TRACE)
+  // Stream bytes parsed so far. Exact inside onObjectBegin and onObjectPayload,
+  // where the codec has already split the payload it delivers off ingress_.
+  uint64_t streamBytesConsumed() const {
+    return ingestedBytes_ - ingress_.chainLength();
+  }
+#endif
 
  private:
   enum class ParseState {

@@ -13,6 +13,11 @@
 namespace moxygen {
 
 void MoQCodec::onIngressStart(std::unique_ptr<folly::IOBuf> data) {
+#if defined(MOXYGEN_MOQ_TRACE)
+  if (data) {
+    ingestedBytes_ += data->computeChainDataLength();
+  }
+#endif
   ingress_.append(std::move(data));
 }
 
@@ -300,6 +305,15 @@ MoQCodec::ParseResult MoQObjectStreamCodec::onIngress(
           curObjectHeader_ = std::get<ObjectHeader>(fetchRes->value);
         } else {
           XDCHECK(streamType_ == StreamType::SUBGROUP_HEADER_SG);
+#if defined(MOXYGEN_MOQ_TRACE)
+          // An underflowing parse is retried from the header's start once more
+          // bytes arrive, so only the successful attempt is reported.
+          const bool traceHeader = callback_ && callback_->traceObjectHeaders();
+          const uint64_t headerStartNs =
+              traceHeader ? quic_trace::now_ns() : 0;
+          const uint64_t headerStartOffset =
+              ingestedBytes_ - ingress_.chainLength() + totalBytesConsumed;
+#endif
           auto subgroupRes = moqFrameParser_.parseSubgroupObjectHeader(
               cursor, remainingLength, curObjectHeader_, subgroupOptions_);
           if (subgroupRes.hasError()) {
@@ -309,6 +323,15 @@ MoQCodec::ParseResult MoQObjectStreamCodec::onIngress(
           }
           totalBytesConsumed += subgroupRes->bytesConsumed;
           curObjectHeader_ = subgroupRes->value;
+#if defined(MOXYGEN_MOQ_TRACE)
+          if (traceHeader) {
+            callback_->onObjectHeaderTrace(
+                headerStartNs,
+                headerStartOffset,
+                quic_trace::now_ns(),
+                headerStartOffset + subgroupRes->bytesConsumed);
+          }
+#endif
         }
         if (curObjectHeader_.status == ObjectStatus::NORMAL) {
           XLOG(DBG2) << "Parsing object with length, need="

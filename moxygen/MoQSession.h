@@ -8,6 +8,7 @@
 
 #include <proxygen/lib/http/webtransport/WebTransport.h>
 #include <moxygen/MoQCodec.h>
+#include <moxygen/MoQTrace.h>
 #include <moxygen/events/MoQDeliveryTimer.h>
 #include <moxygen/events/MoQExecutor.h>
 #include <chrono>
@@ -276,6 +277,13 @@ class MoQSession : public Subscriber,
   const MoQSettings& getMoqSettings() const {
     return moqSettings_;
   }
+#if defined(MOXYGEN_MOQ_TRACE)
+  // Process-wide session identity on MoQ trace events, shared with the Rust
+  // hooks of any other implementation in the process.
+  uint64_t traceSessionId() const {
+    return traceSessionId_;
+  }
+#endif
   void setPublishHandler(std::shared_ptr<Publisher> publishHandler);
   void setSubscribeHandler(std::shared_ptr<Subscriber> subscribeHandler);
 
@@ -534,6 +542,15 @@ class MoQSession : public Subscriber,
       }
       return nullptr;
     }
+
+#if defined(MOXYGEN_MOQ_TRACE)
+    std::optional<uint64_t> traceSessionId() const {
+      if (session_) {
+        return session_->traceSessionId();
+      }
+      return std::nullopt;
+    }
+#endif
 
     std::shared_ptr<MoQExecutor> getExecutor() const {
       return session_ ? session_->exec_ : nullptr;
@@ -1548,6 +1565,9 @@ class MoQSession : public Subscriber,
   ServerSetupCallback* serverSetupCallback_{nullptr};
   MoQSessionCloseCallback* closeCallback_{nullptr};
   MoQSettings moqSettings_;
+#if defined(MOXYGEN_MOQ_TRACE)
+  const uint64_t traceSessionId_{moq_trace::next_session_id()};
+#endif
 
   bool authTokenCacheEnabled_{true};
 

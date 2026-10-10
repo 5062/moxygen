@@ -10,6 +10,8 @@
 
 #include <folly/portability/GTest.h>
 
+#include <algorithm>
+
 namespace {
 moxygen::FrameType getErrorFrameType(
     uint64_t version,
@@ -453,6 +455,87 @@ TEST_P(MoQCodecTest, EmptyObjectPayload) {
   objectStreamCodec_.onIngress(writeBuf.move(), false);
   objectStreamCodec_.onIngress(std::unique_ptr<folly::IOBuf>(), true);
 }
+
+#if defined(MOXYGEN_MOQ_TRACE)
+// Records what the codec reports to the MoQ trace hooks.
+class TraceRecordingCallback : public testing::NiceMock<MockMoQCodecCallback> {
+ public:
+  struct Header {
+    uint64_t startOffset;
+    uint64_t endOffset;
+    bool ordered;
+  };
+
+  bool traceObjectHeaders() const override {
+    return true;
+  }
+
+  void onObjectHeaderTrace(
+      uint64_t startNs,
+      uint64_t startOffset,
+      uint64_t endNs,
+      uint64_t endOffset) override {
+    headers.push_back({startOffset, endOffset, startNs <= endNs});
+  }
+
+  std::vector<Header> headers;
+};
+
+// The trace hooks place each object on its stream by byte offset, so the
+// offsets must count every stream byte however the stream is split into reads.
+TEST_P(MoQCodecTest, TraceOffsetsCoverObjectsAcrossReads) {
+  folly::IOBufQueue writeBuf{folly::IOBufQueue::cacheChainLength()};
+  auto res = moqFrameWriter_.writeSubgroupHeader(
+      writeBuf, TrackAlias(1), ObjectHeader(2, 3, 4, 5), SubgroupOptions{});
+  ASSERT_TRUE(res.hasValue());
+  const uint64_t firstHeaderStart = writeBuf.chainLength();
+  res = moqFrameWriter_.writeStreamObject(
+      writeBuf,
+      StreamType::SUBGROUP_HEADER_SG,
+      ObjectHeader(2, 3, 4, 5, 5),
+      folly::IOBuf::copyBuffer("hello"));
+  ASSERT_TRUE(res.hasValue());
+  const uint64_t secondHeaderStart = writeBuf.chainLength();
+  res = moqFrameWriter_.writeStreamObject(
+      writeBuf,
+      StreamType::SUBGROUP_HEADER_SG,
+      ObjectHeader(2, 3, 5, 5, 11),
+      folly::IOBuf::copyBuffer("hello world"));
+  ASSERT_TRUE(res.hasValue());
+  const uint64_t streamLength = writeBuf.chainLength();
+
+  TraceRecordingCallback callback;
+  MoQObjectStreamCodec codec(&callback);
+  codec.initializeVersion(GetParam());
+  // Where parsing had reached each time the codec handed over payload bytes.
+  std::vector<uint64_t> consumed;
+  ON_CALL(callback, onObjectBegin)
+      .WillByDefault([&](auto&&...) {
+        consumed.push_back(codec.streamBytesConsumed());
+        return MoQCodec::ParseResult::CONTINUE;
+      });
+  ON_CALL(callback, onObjectPayload)
+      .WillByDefault([&](auto&&...) {
+        consumed.push_back(codec.streamBytesConsumed());
+        return MoQCodec::ParseResult::CONTINUE;
+      });
+  while (writeBuf.chainLength() > 3) {
+    codec.onIngress(writeBuf.split(3), false);
+  }
+  codec.onIngress(writeBuf.move(), true);
+
+  ASSERT_EQ(callback.headers.size(), 2);
+  EXPECT_EQ(callback.headers[0].startOffset, firstHeaderStart);
+  EXPECT_EQ(callback.headers[0].endOffset, secondHeaderStart - 5);
+  EXPECT_EQ(callback.headers[1].startOffset, secondHeaderStart);
+  EXPECT_EQ(callback.headers[1].endOffset, streamLength - 11);
+  EXPECT_TRUE(callback.headers[0].ordered);
+  EXPECT_TRUE(callback.headers[1].ordered);
+  ASSERT_FALSE(consumed.empty());
+  EXPECT_TRUE(std::is_sorted(consumed.begin(), consumed.end()));
+  EXPECT_EQ(consumed.back(), streamLength);
+}
+#endif
 
 TEST_P(MoQCodecTest, TruncatedObject) {
   folly::IOBufQueue writeBuf{folly::IOBufQueue::cacheChainLength()};
