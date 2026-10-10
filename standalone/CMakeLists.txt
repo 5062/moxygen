@@ -21,6 +21,8 @@ add_compile_definitions(GLOG_USE_GLOG_EXPORT)
 option(BUILD_TESTS "Build tests" ON)
 option(BUILD_MOQTEST "Build the moqtest client, server and perf executables" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries (discouraged)" OFF)
+option(MOXYGEN_MOQ_TRACE
+    "Emit MoQ object trace events through the moq_trace LTTng providers" OFF)
 
 # =============================================================================
 # Linking preferences
@@ -319,6 +321,15 @@ list(APPEND CMAKE_MODULE_PATH
 include(MoxygenFunctions)
 if(BUILD_TESTS)
     include(MoxygenTest)
+endif()
+
+# The moq_trace C++ facade and its static LTTng providers, from an install of
+# the moq-trace toolkit on CMAKE_PREFIX_PATH. Every moxygen target links it, so
+# the providers reach the final binary once however many libraries use them.
+if(MOXYGEN_MOQ_TRACE)
+    find_package(moq_trace CONFIG REQUIRED)
+    add_compile_definitions(MOXYGEN_MOQ_TRACE)
+    link_libraries(moq_trace::cpp)
 endif()
 
 # Include moxygen's main CMakeLists.txt
