@@ -482,10 +482,15 @@ class StreamPublisherImpl
 #if defined(MOXYGEN_MOQ_TRACE)
   // Start tracing the copy about to be written, when it forwards the inbound
   // object this thread is handing to the relay. Call after validatePublish,
-  // which opens the stream.
-  void traceCopyBegin(uint64_t objectID, uint64_t length);
-  // Record the forwarder's clone of a later payload fragment for this copy.
-  void traceFragmentClone();
+  // which opens the stream. The copy's work, from its start until copyWork
+  // leaves scope, is excluded from the inbound object's fan-out.
+  void traceCopyBegin(
+      uint64_t objectID,
+      uint64_t length,
+      moq_trace::CopyWork& copyWork);
+  // Record the forwarder's clone of a later payload fragment for this copy,
+  // whose work is excluded from the fan-out from the clone on.
+  void traceFragmentClone(moq_trace::CopyWork& copyWork);
   // The copy's write returned. The copy ends once its last byte is written,
   // or with the first write that failed.
   void traceCopyDone(bool succeeded, bool cancelled);
@@ -888,7 +893,8 @@ folly::Expected<folly::Unit, MoQPublishError> StreamPublisherImpl::objectImpl(
   }
 
 #if defined(MOXYGEN_MOQ_TRACE)
-  traceCopyBegin(objectID, length);
+  moq_trace::CopyWork traceCopyWork;
+  traceCopyBegin(objectID, length, traceCopyWork);
 #endif
   auto res = writeCurrentObject(
       objectID,
@@ -935,7 +941,8 @@ folly::Expected<folly::Unit, MoQPublishError> StreamPublisherImpl::beginObject(
   }
 
 #if defined(MOXYGEN_MOQ_TRACE)
-  traceCopyBegin(objectID, length);
+  moq_trace::CopyWork traceCopyWork;
+  traceCopyBegin(objectID, length, traceCopyWork);
 #endif
   auto res = writeCurrentObject(
       objectID,
@@ -968,7 +975,8 @@ StreamPublisherImpl::objectPayload(Payload payload, bool finStream) {
     return validateObjectPublishRes;
   }
 #if defined(MOXYGEN_MOQ_TRACE)
-  traceFragmentClone();
+  moq_trace::CopyWork traceCopyWork;
+  traceFragmentClone(traceCopyWork);
   auto writePhase = traceObject_
       ? traceObject_->phase(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_WRITE)
       : moq_trace::ObjectPhase{};
@@ -1047,12 +1055,23 @@ StreamPublisherImpl::publishStatus(
   }
   header_.status = status;
   header_.length = std::nullopt;
-  return writeCurrentObject(
+#if defined(MOXYGEN_MOQ_TRACE)
+  // A status object is an object, so its copy is traced like any other.
+  moq_trace::CopyWork traceCopyWork;
+  traceCopyBegin(objectID, /*length=*/0, traceCopyWork);
+#endif
+  auto res = writeCurrentObject(
       objectID,
       /*length=*/0,
       /*payload=*/nullptr,
       extensions,
       finStream);
+#if defined(MOXYGEN_MOQ_TRACE)
+  traceCopyDone(
+      res.hasValue(),
+      res.hasError() && res.error().code == MoQPublishError::CANCELLED);
+#endif
+  return res;
 }
 
 folly::Expected<folly::Unit, MoQPublishError>
@@ -1113,7 +1132,10 @@ void StreamPublisherImpl::reset(ResetStreamErrorCode error) {
 }
 
 #if defined(MOXYGEN_MOQ_TRACE)
-void StreamPublisherImpl::traceCopyBegin(uint64_t objectID, uint64_t length) {
+void StreamPublisherImpl::traceCopyBegin(
+    uint64_t objectID,
+    uint64_t length,
+    moq_trace::CopyWork& copyWork) {
   const auto clone = std::exchange(trace::pendingClone, std::nullopt);
   if (traceObject_) {
     // The previous copy never finished, which validatePublish does not allow.
@@ -1138,6 +1160,7 @@ void StreamPublisherImpl::traceCopyBegin(uint64_t objectID, uint64_t length) {
   context.start_ns = startNs;
   context.payload_bytes = length;
   traceObject_.emplace(context);
+  copyWork.begin(startNs);
   // The copy waited from the instant the relay began handing the object to
   // its consumers until its clone. Fan-out is synchronous, so the wait
   // includes writing the copies of subscribers served before this one.
@@ -1150,9 +1173,13 @@ void StreamPublisherImpl::traceCopyBegin(uint64_t objectID, uint64_t length) {
   }
 }
 
-void StreamPublisherImpl::traceFragmentClone() {
+void StreamPublisherImpl::traceFragmentClone(moq_trace::CopyWork& copyWork) {
   const auto clone = std::exchange(trace::pendingClone, std::nullopt);
-  if (traceObject_ && clone) {
+  if (!traceObject_) {
+    return;
+  }
+  copyWork.begin(clone ? clone->startNs : quic_trace::now_ns());
+  if (clone) {
     traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_CLONE, clone->startNs)
         .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, clone->endNs);
   }
@@ -4183,9 +4210,11 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
 
 #if defined(MOXYGEN_MOQ_TRACE)
     std::optional<trace::ScopedInboundObject> traceScope;
+    std::optional<moq_trace::FanOut> traceFanOut;
     if (traceHeader && !fetchState_) {
       traceScope.emplace(traceObjectBegin(
           *traceHeader, traceEntryNs, group, objectID, length));
+      traceFanOut.emplace();
     }
 #endif
     folly::Expected<folly::Unit, MoQPublishError> res{folly::unit};
@@ -4209,9 +4238,6 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
             std::move(extensions),
             streamComplete);
       }
-      if (streamComplete) {
-        endOfSubgroup();
-      }
     } else {
       res = invokeCallback(
           &SubgroupConsumer::beginObject,
@@ -4224,8 +4250,11 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
           std::move(extensions));
     }
 #if defined(MOXYGEN_MOQ_TRACE)
-    traceFragmentDone(res.hasValue(), objectComplete);
+    traceFragmentDone(traceFanOut, res.hasValue(), objectComplete);
 #endif
+    if (objectComplete && streamComplete) {
+      endOfSubgroup();
+    }
     return res ? MoQCodec::ParseResult::CONTINUE
                : MoQCodec::ParseResult::ERROR_TERMINATE;
   }
@@ -4263,9 +4292,11 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
 
 #if defined(MOXYGEN_MOQ_TRACE)
     std::optional<trace::ScopedInboundObject> traceScope;
+    std::optional<moq_trace::FanOut> traceFanOut;
     if (traceObject_) {
       traceScope.emplace(
           traceObjectFragment(tracePayloadStartNs, traceEntryNs));
+      traceFanOut.emplace();
     }
 #endif
     bool finStream = false;
@@ -4276,7 +4307,7 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
         std::move(payload),
         finStream);
 #if defined(MOXYGEN_MOQ_TRACE)
-    traceFragmentDone(res.hasValue(), objectComplete);
+    traceFragmentDone(traceFanOut, res.hasValue(), objectComplete);
 #endif
     if (!res) {
       return MoQCodec::ParseResult::ERROR_TERMINATE;
@@ -4294,8 +4325,9 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
       std::optional<uint8_t> priority,
       ObjectStatus status) override {
 #if defined(MOXYGEN_MOQ_TRACE)
-    // Status objects carry no payload and are not traced.
-    traceHeader_.reset();
+    const auto traceHeader = std::exchange(traceHeader_, std::nullopt);
+    const uint64_t traceEntryNs =
+        traceHeader && !fetchState_ ? quic_trace::now_ns() : 0;
 #endif
     if (isCancelled()) {
       return MoQCodec::ParseResult::ERROR_TERMINATE;
@@ -4305,36 +4337,54 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
           return r ? MoQCodec::ParseResult::CONTINUE
                    : MoQCodec::ParseResult::ERROR_TERMINATE;
         };
+    if (status == ObjectStatus::END_OF_GROUP && fetchState_) {
+      // FetchConsumer::endOfGroup has an optional param
+      return toParseResult(fetchState_->getFetchCallback()->endOfGroup(
+          group,
+          subgroup,
+          objectID,
+          /*finFetch=*/false));
+    }
+
+#if defined(MOXYGEN_MOQ_TRACE)
+    // A status object is an object, so it is traced like any other, whether
+    // or not the relay forwards it.
+    std::optional<trace::ScopedInboundObject> traceScope;
+    std::optional<moq_trace::FanOut> traceFanOut;
+    if (traceHeader && !fetchState_) {
+      traceScope.emplace(traceObjectBegin(
+          *traceHeader, traceEntryNs, group, objectID, /*length=*/0));
+      traceFanOut.emplace();
+    }
+#endif
     // Handle subscription/fetch consumers
+    folly::Expected<folly::Unit, MoQPublishError> res{folly::unit};
+    bool subgroupEnded = false;
     switch (status) {
       case ObjectStatus::END_OF_GROUP:
-        // FetchConsumer::endOfGroup has an optional param
-        if (fetchState_) {
-          return toParseResult(fetchState_->getFetchCallback()->endOfGroup(
-              group,
-              subgroup,
-              objectID,
-              /*finFetch=*/false));
-        } else {
-          auto r = subgroupCallback_->endOfGroup(objectID);
-          endOfSubgroup();
-          return toParseResult(r);
-        }
-      case ObjectStatus::END_OF_TRACK: {
-        auto r = invokeCallback(
+        res = subgroupCallback_->endOfGroup(objectID);
+        subgroupEnded = true;
+        break;
+      case ObjectStatus::END_OF_TRACK:
+        res = invokeCallback(
             &SubgroupConsumer::endOfTrackAndGroup,
             &FetchConsumer::endOfTrackAndGroup,
             group,
             subgroup,
             objectID);
-        endOfSubgroup();
-        return toParseResult(r);
-      }
+        subgroupEnded = true;
+        break;
       case ObjectStatus::NORMAL:
       default:
         break;
     }
-    return MoQCodec::ParseResult::CONTINUE;
+#if defined(MOXYGEN_MOQ_TRACE)
+    traceFragmentDone(traceFanOut, res.hasValue(), /*objectComplete=*/true);
+#endif
+    if (subgroupEnded) {
+      endOfSubgroup();
+    }
+    return toParseResult(res);
   }
 
   MoQCodec::ParseResult onEndOfRange(
@@ -4445,7 +4495,8 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
   // copies see while the consumer forwards it.
   //
   // Payload read runs from the end of the header parse until this callback,
-  // which is the codec splitting the first payload bytes off its buffer.
+  // which is the codec splitting the first payload bytes off its buffer. A
+  // status object has no payload, so it records no payload read.
   // Create runs from the callback until the consumer call, minus this
   // bookkeeping, which falls into each copy's delivery wait instead. The
   // relay stores nothing before forwarding, so the consumer call is where the
@@ -4484,8 +4535,10 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
     traceObject_.emplace(context);
     traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_HEADER_PARSE, header.startNs)
         .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, header.endNs);
-    traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ, header.endNs)
-        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, entryNs);
+    if (length > 0) {
+      traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_PAYLOAD_READ, header.endNs)
+          .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, entryNs);
+    }
     traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_CREATE, entryNs)
         .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, createEndNs);
     traceObject_->set_stream_offset_end(traceCodec_->streamBytesConsumed());
@@ -4514,9 +4567,17 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
     return &traceInbound_;
   }
 
-  // The consumer returned from a fragment. The object ends with its last
-  // fragment, or with the first one the consumer rejected.
-  void traceFragmentDone(bool succeeded, bool objectComplete) {
+  // The consumer returned from a fragment. Its call is the relay's fan-out of
+  // the fragment, recorded as notify minus the copies written inside it. The
+  // object ends with its last fragment, or with the first one the consumer
+  // rejected.
+  void traceFragmentDone(
+      std::optional<moq_trace::FanOut>& fanOut,
+      bool succeeded,
+      bool objectComplete) {
+    if (fanOut && traceObject_) {
+      fanOut->end().record(*traceObject_);
+    }
     if (!traceObject_ || (succeeded && !objectComplete)) {
       return;
     }
