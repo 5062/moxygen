@@ -461,7 +461,9 @@ TEST_P(MoQCodecTest, EmptyObjectPayload) {
 class TraceRecordingCallback : public testing::NiceMock<MockMoQCodecCallback> {
  public:
   struct Header {
+    uint64_t startNs;
     uint64_t startOffset;
+    uint64_t endNs;
     uint64_t endOffset;
     bool ordered;
   };
@@ -475,7 +477,8 @@ class TraceRecordingCallback : public testing::NiceMock<MockMoQCodecCallback> {
       uint64_t startOffset,
       uint64_t endNs,
       uint64_t endOffset) override {
-    headers.push_back({startOffset, endOffset, startNs <= endNs});
+    headers.push_back(
+        {startNs, startOffset, endNs, endOffset, startNs <= endNs});
   }
 
   std::vector<Header> headers;
@@ -534,6 +537,36 @@ TEST_P(MoQCodecTest, TraceOffsetsCoverObjectsAcrossReads) {
   ASSERT_FALSE(consumed.empty());
   EXPECT_TRUE(std::is_sorted(consumed.begin(), consumed.end()));
   EXPECT_EQ(consumed.back(), streamLength);
+}
+
+// An object starts when its header's first bytes are readable. A header split
+// across reads is parsed again once the rest arrives, and the object's start
+// stays at the first attempt.
+TEST_P(MoQCodecTest, TraceHeaderStartsAtFirstHeaderBytes) {
+  folly::IOBufQueue writeBuf{folly::IOBufQueue::cacheChainLength()};
+  auto res = moqFrameWriter_.writeSubgroupHeader(
+      writeBuf, TrackAlias(1), ObjectHeader(2, 3, 4, 5), SubgroupOptions{});
+  ASSERT_TRUE(res.hasValue());
+  const uint64_t headerStart = writeBuf.chainLength();
+  res = moqFrameWriter_.writeStreamObject(
+      writeBuf,
+      StreamType::SUBGROUP_HEADER_SG,
+      ObjectHeader(2, 3, 4, 5, 5),
+      folly::IOBuf::copyBuffer("hello"));
+  ASSERT_TRUE(res.hasValue());
+
+  TraceRecordingCallback callback;
+  MoQObjectStreamCodec codec(&callback);
+  codec.initializeVersion(GetParam());
+  codec.onIngress(writeBuf.split(headerStart + 1), false);
+  EXPECT_TRUE(callback.headers.empty());
+  const uint64_t secondReadNs = quic_trace::now_ns();
+  codec.onIngress(writeBuf.move(), true);
+
+  ASSERT_EQ(callback.headers.size(), 1);
+  EXPECT_EQ(callback.headers[0].startOffset, headerStart);
+  EXPECT_LE(callback.headers[0].startNs, secondReadNs);
+  EXPECT_GE(callback.headers[0].endNs, secondReadNs);
 }
 #endif
 
