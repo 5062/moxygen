@@ -85,6 +85,16 @@ toolkit facade to mvfst, proxygen, and moxygen alike. `TRACE=0` compiles the
 hooks out and builds upstream mvfst. `MOXYGEN_BUILD_DIR` moves the build tree,
 so the two configurations keep separate artifacts.
 
+```sh
+nix develop --command moq_trace/test.sh
+```
+
+`moq_trace/test.sh` builds and runs `MoQTests` in the same configuration and
+passes its options to the test binary. The trace tests in `MoQCodecTest` check
+that object offsets count every stream byte however the stream is split into
+reads, and that an object whose header is split across reads starts at its
+first header bytes.
+
 ## Running
 
 The relay reads datagrams through folly's read callback by default, which hides

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Build moqrelayserver in this checkout, optionally with the MoQ trace hooks.
 #
-#   nix develop --command moq_trace/build.sh
+#   nix develop --command moq_trace/build.sh [target...]
+#
+# Arguments name other CMake targets to build instead, such as MoQTests, which
+# moq_trace/test.sh builds. The test targets are always configured, so building
+# the relay and its tests never reconfigures the tree between them.
 #
 # The traced build finds the moq-trace toolkit's C++ install, the prefix holding
 # lib/cmake/moq_trace, through MOQ_TRACE_PREFIX. TRACE=0 compiles the hooks out,
@@ -24,7 +28,7 @@ build=${MOXYGEN_BUILD_DIR:-$here/_build}
 options=(
   -G Ninja
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
-  -DBUILD_TESTS=OFF
+  -DBUILD_TESTS=ON
   -DBUILD_MOQTEST=OFF
 )
 if [ "${TRACE:-1}" = 0 ]; then
@@ -43,4 +47,8 @@ else
 fi
 
 cmake -B "$build" -S "$here/standalone" "${options[@]}"
-exec cmake --build "$build" --target moqrelayserver
+targets=("$@")
+if [ ${#targets[@]} -eq 0 ]; then
+  targets=(moqrelayserver)
+fi
+exec cmake --build "$build" --target "${targets[@]}"
