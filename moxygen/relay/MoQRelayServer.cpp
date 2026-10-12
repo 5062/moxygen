@@ -48,6 +48,11 @@ DEFINE_bool(
     false,
     "Listen on QMUX-on-TCP (TLS via Fizz is mandatory). May be combined with "
     "--quic for dual-stack.");
+DEFINE_bool(
+    recvmmsg,
+    false,
+    "Read datagrams with mvfst's own recvmmsg call instead of folly's read "
+    "callback");
 
 namespace {
 using namespace moxygen;
@@ -114,6 +119,7 @@ int main(int argc, char* argv[]) {
               FLAGS_key);
     auto ts = MoQServer::defaultTransportSettings();
     ts.orderedReadCallbacks = true;
+    ts.shouldUseWrapperRecvmmsgForBatchRecv = FLAGS_recvmmsg;
     quicServer = std::make_shared<MoQRelayQuicServer>(
         relay,
         std::move(fizzContext),

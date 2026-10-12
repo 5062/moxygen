@@ -66,6 +66,14 @@ struct CloneSpan {
 
 inline thread_local std::optional<CloneSpan> pendingClone;
 
+// The encoded size of a minimal QUIC variable-length integer.
+inline uint64_t varintSize(uint64_t value) {
+  return value < (1ULL << 6) ? 1
+      : value < (1ULL << 14) ? 2
+      : value < (1ULL << 30) ? 4
+                             : 8;
+}
+
 // Whether any object event would be recorded, so hooks read no clock when
 // tracing is off.
 inline bool objectTraceEnabled() {

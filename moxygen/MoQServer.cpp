@@ -361,6 +361,11 @@ void MoQServer::Handler::onHeadersComplete(
   clientSession_ = server_.createSession(
       folly::MaybeManagedPtr<proxygen::WebTransport>(wt),
       server_.getOrCreateExecutor(evb));
+#if defined(MOXYGEN_MOQ_TRACE)
+  // The CONNECT stream's ID is the WebTransport session ID, which prefixes
+  // every stream of the session.
+  clientSession_->setTraceWebTransportSessionId(txn_->getID());
+#endif
   quic::QuicSocket* quicSocket = nullptr;
   auto& transport = txn_->getTransport();
   if (transport.getSessionType() ==

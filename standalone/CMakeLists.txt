@@ -212,10 +212,26 @@ FetchContent_Declare(wangle
     GIT_TAG ${WANGLE_REV}
 )
 
-FetchContent_Declare(mvfst
-    GIT_REPOSITORY https://github.com/facebook/mvfst.git
-    GIT_TAG ${MVFST_REV}
-)
+# Traced builds take mvfst from the fork that carries its quic_trace hooks,
+# at the revision moq_trace/mvfst-rev.txt pins. FETCHCONTENT_SOURCE_DIR_MVFST
+# replaces it with a local checkout of that fork.
+if(MOXYGEN_MOQ_TRACE)
+    set(_MVFST_TRACE_REV_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../moq_trace/mvfst-rev.txt")
+    set_property(DIRECTORY APPEND PROPERTY
+        CMAKE_CONFIGURE_DEPENDS "${_MVFST_TRACE_REV_FILE}")
+    file(READ "${_MVFST_TRACE_REV_FILE}" _MVFST_TRACE_REV)
+    string(STRIP "${_MVFST_TRACE_REV}" _MVFST_TRACE_REV)
+    message(STATUS "Using traced mvfst rev: ${_MVFST_TRACE_REV}")
+    FetchContent_Declare(mvfst
+        GIT_REPOSITORY https://github.com/5062/mvfst.git
+        GIT_TAG ${_MVFST_TRACE_REV}
+    )
+else()
+    FetchContent_Declare(mvfst
+        GIT_REPOSITORY https://github.com/facebook/mvfst.git
+        GIT_TAG ${MVFST_REV}
+    )
+endif()
 
 # Allow overriding proxygen repo/rev via -DPROXYGEN_REPO_OVERRIDE and
 # -DPROXYGEN_REV_OVERRIDE
@@ -283,6 +299,20 @@ if(NOT wangle_POPULATED)
         ${wangle_SOURCE_DIR}/wangle ${wangle_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
 
+# The moq_trace C++ facade and its static LTTng providers, from an install of
+# the moq-trace toolkit on CMAKE_PREFIX_PATH. Tracing switches hooks in moxygen
+# and in mvfst, whose headers change layout with MVFST_MOQ_TRACE, so the
+# definitions and the facade apply to everything built from here on: mvfst,
+# proxygen, which includes mvfst headers, and moxygen. folly, fizz, and wangle
+# include no mvfst header and keep their flags. The providers still reach the
+# final binary once.
+if(MOXYGEN_MOQ_TRACE)
+    find_package(moq_trace CONFIG REQUIRED)
+    add_compile_definitions(MOXYGEN_MOQ_TRACE MVFST_MOQ_TRACE)
+    link_libraries(moq_trace::cpp)
+    set(MVFST_MOQ_TRACE ON CACHE BOOL "Emit quic_trace transport events" FORCE)
+endif()
+
 FetchContent_GetProperties(mvfst)
 if(NOT mvfst_POPULATED)
     FetchContent_Populate(mvfst)
@@ -321,15 +351,6 @@ list(APPEND CMAKE_MODULE_PATH
 include(MoxygenFunctions)
 if(BUILD_TESTS)
     include(MoxygenTest)
-endif()
-
-# The moq_trace C++ facade and its static LTTng providers, from an install of
-# the moq-trace toolkit on CMAKE_PREFIX_PATH. Every moxygen target links it, so
-# the providers reach the final binary once however many libraries use them.
-if(MOXYGEN_MOQ_TRACE)
-    find_package(moq_trace CONFIG REQUIRED)
-    add_compile_definitions(MOXYGEN_MOQ_TRACE)
-    link_libraries(moq_trace::cpp)
 endif()
 
 # Include moxygen's main CMakeLists.txt

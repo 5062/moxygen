@@ -283,6 +283,30 @@ class MoQSession : public Subscriber,
   uint64_t traceSessionId() const {
     return traceSessionId_;
   }
+
+  // Identity of the session's connection on quic_trace events, which ties its
+  // objects to the packets that carried them. The transport reports it.
+  std::optional<uint64_t> traceConnectionId() const {
+    if (!traceConnectionId_ && wt_) {
+      traceConnectionId_ = wt_->getTransportInfo().quicTraceConnectionId;
+    }
+    return traceConnectionId_;
+  }
+
+  // Bytes a stream carries before its first MoQ byte, which trace offsets
+  // count so that they match the transport's STREAM frames. A WebTransport
+  // stream over HTTP/3 starts with its stream type and session ID, while a
+  // raw QUIC session's streams carry MoQ from their first byte.
+  uint64_t traceStreamPrefix() const {
+    return traceStreamPrefix_;
+  }
+
+  // Record the HTTP/3 WebTransport session that carries this MoQ session. Its
+  // unidirectional streams start with the stream type 0x54 and this ID, each
+  // a minimal QUIC varint, which is the prefix the server's HQ session writes.
+  void setTraceWebTransportSessionId(uint64_t sessionId) {
+    traceStreamPrefix_ = trace::varintSize(0x54) + trace::varintSize(sessionId);
+  }
 #endif
   void setPublishHandler(std::shared_ptr<Publisher> publishHandler);
   void setSubscribeHandler(std::shared_ptr<Subscriber> subscribeHandler);
@@ -549,6 +573,14 @@ class MoQSession : public Subscriber,
         return session_->traceSessionId();
       }
       return std::nullopt;
+    }
+
+    std::optional<uint64_t> traceConnectionId() const {
+      return session_ ? session_->traceConnectionId() : std::nullopt;
+    }
+
+    uint64_t traceStreamPrefix() const {
+      return session_ ? session_->traceStreamPrefix() : 0;
     }
 #endif
 
@@ -1567,6 +1599,8 @@ class MoQSession : public Subscriber,
   MoQSettings moqSettings_;
 #if defined(MOXYGEN_MOQ_TRACE)
   const uint64_t traceSessionId_{moq_trace::next_session_id()};
+  mutable std::optional<uint64_t> traceConnectionId_;
+  uint64_t traceStreamPrefix_{0};
 #endif
 
   bool authTokenCacheEnabled_{true};

@@ -795,7 +795,8 @@ StreamPublisherImpl::writeToStream(bool finStream, bool endObject) {
       writeRes.hasValue() ? MOQ_TRACE_OBJECT_OUTCOME_SUCCESS
                           : MOQ_TRACE_OBJECT_OUTCOME_FAILED);
   if (traceObject_) {
-    traceObject_->set_stream_offset_end(bytesWritten_);
+    traceObject_->set_stream_offset_end(
+        publisher_->traceStreamPrefix() + bytesWritten_);
   }
 #endif
   if (writeRes.hasValue()) {
@@ -1154,9 +1155,11 @@ void StreamPublisherImpl::traceCopyBegin(
       moq_trace::ObjectIdentity{trackAlias_.value, header_.group, objectID};
   context.direction = QUIC_TRACE_DIRECTION_TX;
   context.session_id = publisher_->traceSessionId();
+  context.connection_id = publisher_->traceConnectionId();
   context.stream_id = writeHandle_->getID();
   // A new stream's subgroup header is still in writeBuf_ ahead of the object.
-  context.stream_offset_start = bytesWritten_ + writeBuf_.chainLength();
+  context.stream_offset_start = publisher_->traceStreamPrefix() +
+      bytesWritten_ + writeBuf_.chainLength();
   context.start_ns = startNs;
   context.payload_bytes = length;
   traceObject_.emplace(context);
@@ -4528,8 +4531,10 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
         moq_trace::ObjectIdentity{trackAlias_.value, group, objectID};
     context.direction = QUIC_TRACE_DIRECTION_RX;
     context.session_id = session_->traceSessionId();
+    context.connection_id = session_->traceConnectionId();
     context.stream_id = currentStreamId_;
-    context.stream_offset_start = header.startOffset;
+    context.stream_offset_start =
+        session_->traceStreamPrefix() + header.startOffset;
     context.start_ns = header.startNs;
     context.payload_bytes = length;
     traceObject_.emplace(context);
@@ -4541,7 +4546,8 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
     }
     traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_CREATE, entryNs)
         .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, createEndNs);
-    traceObject_->set_stream_offset_end(traceCodec_->streamBytesConsumed());
+    traceObject_->set_stream_offset_end(
+        session_->traceStreamPrefix() + traceCodec_->streamBytesConsumed());
     traceInbound_ = trace::InboundObject{logicalId, quic_trace::now_ns()};
     return &traceInbound_;
   }
@@ -4562,7 +4568,8 @@ class ObjectStreamCallback : public MoQObjectStreamCodec::ObjectCallback {
       traceObject_->phase_at(MOQ_TRACE_OBJECT_PHASE_FRAME_COMMIT, entryNs)
           .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, commitEndNs);
     }
-    traceObject_->set_stream_offset_end(traceCodec_->streamBytesConsumed());
+    traceObject_->set_stream_offset_end(
+        session_->traceStreamPrefix() + traceCodec_->streamBytesConsumed());
     traceInbound_.readyNs = quic_trace::now_ns();
     return &traceInbound_;
   }
