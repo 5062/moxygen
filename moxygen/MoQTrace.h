@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace moxygen::trace {
@@ -72,6 +73,19 @@ inline uint64_t varintSize(uint64_t value) {
       : value < (1ULL << 14) ? 2
       : value < (1ULL << 30) ? 4
                              : 8;
+}
+
+// How an object or copy ended, given the result of the publish call that
+// ended it: a cancelled subscription stops it, and any other error fails it.
+template <typename Result>
+moq_trace_object_outcome outcomeOf(const Result& result) {
+  if (result.hasValue()) {
+    return MOQ_TRACE_OBJECT_OUTCOME_SUCCESS;
+  }
+  using Error = std::decay_t<decltype(result.error())>;
+  return result.error().code == Error::CANCELLED
+      ? MOQ_TRACE_OBJECT_OUTCOME_RESET
+      : MOQ_TRACE_OBJECT_OUTCOME_FAILED;
 }
 
 // Whether any object event would be recorded, so hooks read no clock when
