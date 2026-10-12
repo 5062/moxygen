@@ -406,7 +406,8 @@ class MoQObjectStreamCodec : public MoQCodec {
     }
     // A subgroup object header was parsed, immediately before onObjectBegin or
     // onObjectStatus for it. The offsets are the header's half-open range on
-    // the stream, and the times bound the successful parse on the trace clock.
+    // the stream. The start time is the first parse attempt, when the header's
+    // first bytes were readable, and the end time is the successful parse.
     virtual void onObjectHeaderTrace(
         uint64_t /*startNs*/,
         uint64_t /*startOffset*/,
@@ -454,6 +455,10 @@ class MoQObjectStreamCodec : public MoQCodec {
   StreamType streamType_{StreamType::SUBGROUP_HEADER_SG};
   SubgroupOptions subgroupOptions_;
   ObjectCallback* callback_;
+#if defined(MOXYGEN_MOQ_TRACE)
+  // When the first attempt to parse the current object header began.
+  std::optional<uint64_t> traceHeaderStartNs_;
+#endif
 };
 
 } // namespace moxygen

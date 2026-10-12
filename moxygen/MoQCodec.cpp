@@ -307,10 +307,13 @@ MoQCodec::ParseResult MoQObjectStreamCodec::onIngress(
           XDCHECK(streamType_ == StreamType::SUBGROUP_HEADER_SG);
 #if defined(MOXYGEN_MOQ_TRACE)
           // An underflowing parse is retried from the header's start once more
-          // bytes arrive, so only the successful attempt is reported.
+          // bytes arrive. The object starts at the first attempt, when its
+          // first header bytes are readable, so a header split across reads
+          // includes its wait for the rest.
           const bool traceHeader = callback_ && callback_->traceObjectHeaders();
-          const uint64_t headerStartNs =
-              traceHeader ? quic_trace::now_ns() : 0;
+          if (traceHeader && !traceHeaderStartNs_) {
+            traceHeaderStartNs_ = quic_trace::now_ns();
+          }
           const uint64_t headerStartOffset =
               ingestedBytes_ - ingress_.chainLength() + totalBytesConsumed;
 #endif
@@ -324,9 +327,9 @@ MoQCodec::ParseResult MoQObjectStreamCodec::onIngress(
           totalBytesConsumed += subgroupRes->bytesConsumed;
           curObjectHeader_ = subgroupRes->value;
 #if defined(MOXYGEN_MOQ_TRACE)
-          if (traceHeader) {
+          if (traceHeader && traceHeaderStartNs_) {
             callback_->onObjectHeaderTrace(
-                headerStartNs,
+                *std::exchange(traceHeaderStartNs_, std::nullopt),
                 headerStartOffset,
                 quic_trace::now_ns(),
                 headerStartOffset + subgroupRes->bytesConsumed);
