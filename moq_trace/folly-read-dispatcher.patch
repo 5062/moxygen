@@ -1,0 +1,37 @@
+Route AsyncUDPSocket::handleRead's datagram reads through the socket's netops
+dispatcher, as its sends already are, so a dispatcher installed with
+setOverrideNetOpsDispatcher sees the receive system calls. The default
+dispatcher calls the same functions, so behavior is unchanged without an
+override. The traced moxygen build applies this to folly so mvfst can time
+folly's reads; see MOQ_TRACE.md.
+
+--- a/folly/io/async/AsyncUDPSocket.cpp
++++ b/folly/io/async/AsyncUDPSocket.cpp
+@@ -1566,14 +1566,15 @@
+       msg.msg_control = control;
+       msg.msg_controllen = sizeof(control);
+ 
+-      bytesRead = netops::recvmsg(fd_, &msg, MSG_TRUNC);
++      bytesRead = netops_->recvmsg(fd_, &msg, MSG_TRUNC);
+ 
+       if (bytesRead >= 0) {
+         addrLen = msg.msg_namelen;
+         fromMsg(params, msg);
+       }
+     } else {
+-      bytesRead = netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
++      bytesRead =
++          netops_->recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
+     }
+ #elif defined(_WIN32)
+     WSABUF wBuf;
+@@ -1609,7 +1610,8 @@
+       }
+     }
+ #else
+-    bytesRead = netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
++    bytesRead =
++        netops_->recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
+ #endif
+     if (bytesRead >= 0) {
+       clientAddress_.setFromSockaddr(rawAddr, addrLen);

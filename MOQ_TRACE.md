@@ -97,7 +97,10 @@ first header bytes.
 
 ## Running
 
-The relay reads datagrams through folly's read callback by default, which hides
-the receive system call, so its packets get no RX trace. `-recvmmsg` selects
-mvfst's own `recvmmsg` read path, whose system call the hooks bracket. The
-toolkit's relay profile passes it.
+The relay reads datagrams through folly's read callback by default. The traced
+build patches folly (`moq_trace/folly-read-dispatcher.patch`, applied by the
+standalone CMake when `MOXYGEN_MOQ_TRACE` is on) so those reads go through the
+socket's netops dispatcher, where mvfst times them; the patch changes nothing
+without a dispatcher override. The traced relay therefore keeps stock moxygen's
+read path, and the workspace profile does not pass `-recvmmsg`, which selects
+mvfst's own batched `recvmmsg` read instead.

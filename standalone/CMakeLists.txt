@@ -182,9 +182,20 @@ else()
     set(_FOLLY_REV "${FOLLY_REV}")
 endif()
 
+# Traced builds route folly's UDP reads through the socket's netops
+# dispatcher, so mvfst can time the receive system calls on folly's read path.
+# The patch is behavior-neutral without a dispatcher override.
+set(_FOLLY_PATCH)
+if(MOXYGEN_MOQ_TRACE)
+    set(_FOLLY_PATCH PATCH_COMMAND ${CMAKE_COMMAND}
+        -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/../moq_trace/folly-read-dispatcher.patch
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/../moq_trace/apply-patch.cmake)
+endif()
+
 FetchContent_Declare(folly
     GIT_REPOSITORY ${_FOLLY_REPO}
     GIT_TAG ${_FOLLY_REV}
+    ${_FOLLY_PATCH}
 )
 
 # Allow overriding fizz repo/rev via -DFIZZ_REPO_OVERRIDE and
