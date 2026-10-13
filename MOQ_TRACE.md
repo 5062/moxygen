@@ -85,16 +85,6 @@ toolkit facade to mvfst, proxygen, and moxygen alike. `TRACE=0` compiles the
 hooks out and builds upstream mvfst. `MOXYGEN_BUILD_DIR` moves the build tree,
 so the two configurations keep separate artifacts.
 
-```sh
-nix develop --command moq_trace/test.sh
-```
-
-`moq_trace/test.sh` builds and runs `MoQTests` in the same configuration and
-passes its options to the test binary. The trace tests in `MoQCodecTest` check
-that object offsets count every stream byte however the stream is split into
-reads, and that an object whose header is split across reads starts at its
-first header bytes.
-
 ## Running
 
 The relay reads datagrams through folly's read callback by default. The traced
@@ -104,3 +94,28 @@ socket's netops dispatcher, where mvfst times them; the patch changes nothing
 without a dispatcher override. The traced relay therefore keeps stock moxygen's
 read path, and the workspace profile does not pass `-recvmmsg`, which selects
 mvfst's own batched `recvmmsg` read instead.
+
+## Verification
+
+```sh
+nix develop --command moq_trace/test.sh
+nix develop --command moq_trace/test_trace.sh
+```
+
+`moq_trace/test.sh` builds and runs `MoQTests` in the same configuration and
+passes its options to the test binary. The trace tests in `MoQCodecTest` check
+that object offsets count every stream byte however the stream is split into
+reads, and that an object whose header is split across reads starts at its
+first header bytes.
+
+`moq_trace/test_trace.sh` checks the mvfst fork's transport hooks the way the
+Quinn and Google QUICHE forks check theirs. It runs the traced relay with
+`moqdateserver` publishing and `moqtextclient` subscribing over loopback
+(`moq_trace/trace_fixture.sh`) under LTTng, and checks the events with the
+toolkit's `moq-trace verify`: balanced lifecycles and phases, queue phases on
+their socket boundaries, per-frame phases, connection paths, and no abandoned
+packet. It needs `MOQ_TRACE_PREFIX`, LTTng, OpenSSL, and the `moq-trace` command,
+which the moq-trace development shell provides; from the moq-workspace,
+`just test-trace` runs it with the other stacks' checks. The standalone build
+links `moqdateserver` against folly's manual executor, which upstream's CMake
+leaves out.
