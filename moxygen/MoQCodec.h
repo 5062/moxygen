@@ -433,8 +433,8 @@ class MoQObjectStreamCodec : public MoQCodec {
   }
 
 #if defined(MOXYGEN_MOQ_TRACE)
-  // Stream bytes parsed so far. Exact inside onObjectBegin and onObjectPayload,
-  // where the codec has already split the payload it delivers off ingress_.
+  // Stream bytes parsed so far. Exact inside onObjectBegin, onObjectPayload,
+  // and onObjectStatus, after their header and payload bytes leave ingress_.
   uint64_t streamBytesConsumed() const {
     return ingestedBytes_ - ingress_.chainLength();
   }

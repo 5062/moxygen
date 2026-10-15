@@ -382,6 +382,10 @@ MoQCodec::ParseResult MoQObjectStreamCodec::onIngress(
             parseState_ = ParseState::OBJECT_PAYLOAD;
           }
         } else {
+          // The status callback reads the object's consumed range for tracing.
+          // Consume its header and reset the cursor, as for a zero-byte payload.
+          trimStart();
+          splitAndResetCursor(0);
           if (callback_) {
             auto result = callback_->onObjectStatus(
                 curObjectHeader_.group,

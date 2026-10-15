@@ -539,6 +539,67 @@ TEST_P(MoQCodecTest, TraceOffsetsCoverObjectsAcrossReads) {
   EXPECT_EQ(consumed.back(), streamLength);
 }
 
+// A status callback reports a complete wire object even though it has no payload.
+TEST_P(MoQCodecTest, TraceStatusOffsetsIncludeHeaders) {
+  for (auto status : {ObjectStatus::END_OF_GROUP, ObjectStatus::END_OF_TRACK}) {
+    for (bool precedingObject : {false, true}) {
+      MoQFrameWriter writer;
+      writer.initializeVersion(GetParam());
+      folly::IOBufQueue writeBuf{folly::IOBufQueue::cacheChainLength()};
+      auto res = writer.writeSubgroupHeader(
+          writeBuf, TrackAlias(1), ObjectHeader(2, 3, 4, 5), SubgroupOptions{});
+      ASSERT_TRUE(res.hasValue());
+      if (precedingObject) {
+        res = writer.writeStreamObject(
+            writeBuf,
+            StreamType::SUBGROUP_HEADER_SG,
+            ObjectHeader(2, 3, 4, 5, 5),
+            folly::IOBuf::copyBuffer("hello"));
+        ASSERT_TRUE(res.hasValue());
+      }
+      const uint64_t statusStart = writeBuf.chainLength();
+      res = writer.writeStreamObject(
+          writeBuf,
+          StreamType::SUBGROUP_HEADER_SG,
+          ObjectHeader(2, 3, precedingObject ? 5 : 4, 5, status),
+          nullptr);
+      ASSERT_TRUE(res.hasValue());
+      const uint64_t statusEnd = writeBuf.chainLength();
+      auto wire = writeBuf.move();
+
+      // Include an unsplit stream and every possible split of the status
+      // header.
+      for (size_t split = 0; split <= statusEnd; ++split) {
+        SCOPED_TRACE(static_cast<uint64_t>(status));
+        SCOPED_TRACE(precedingObject);
+        SCOPED_TRACE(split);
+        TraceRecordingCallback callback;
+        MoQObjectStreamCodec codec(&callback);
+        codec.initializeVersion(GetParam());
+        std::optional<uint64_t> consumed;
+        EXPECT_CALL(callback, onObjectStatus).WillOnce([&](auto&&...) {
+          consumed = codec.streamBytesConsumed();
+          return MoQCodec::ParseResult::CONTINUE;
+        });
+        folly::IOBufQueue chunks{folly::IOBufQueue::cacheChainLength()};
+        chunks.append(wire->clone());
+        ASSERT_EQ(
+            codec.onIngress(chunks.split(split), false),
+            MoQCodec::ParseResult::CONTINUE);
+        ASSERT_EQ(
+            codec.onIngress(chunks.move(), true),
+            MoQCodec::ParseResult::CONTINUE);
+        ASSERT_FALSE(callback.headers.empty());
+        EXPECT_EQ(callback.headers.back().startOffset, statusStart);
+        EXPECT_EQ(callback.headers.back().endOffset, statusEnd);
+        ASSERT_TRUE(consumed.has_value());
+        EXPECT_EQ(*consumed, statusEnd);
+        EXPECT_GT(*consumed, statusStart);
+      }
+    }
+  }
+}
+
 // An object starts when its header's first bytes are readable. A header split
 // across reads is parsed again once the rest arrives, and the object's start
 // stays at the first attempt.

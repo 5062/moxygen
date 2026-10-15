@@ -105,8 +105,8 @@ nix develop --command moq_trace/test_trace.sh
 `moq_trace/test.sh` builds and runs `MoQTests` in the same configuration and
 passes its options to the test binary. The trace tests in `MoQCodecTest` check
 that object offsets count every stream byte however the stream is split into
-reads, and that an object whose header is split across reads starts at its
-first header bytes.
+reads, including status-only objects, and that an object whose header is split
+across reads starts at its first header bytes.
 
 `moq_trace/test_trace.sh` checks the mvfst fork's transport hooks the way the
 Quinn and Google QUICHE forks check theirs. It runs the traced relay with
