@@ -6,14 +6,14 @@
 #   moq_trace/test_trace.sh
 #
 # Needs MOQ_TRACE_PREFIX as moq_trace/build.sh does, LTTng, OpenSSL, and the
-# moq-trace command on PATH, which the moq-trace checkout's development shell
+# moq-trace command on PATH, which the moq-workspace checkout's development shell
 # provides. The fixture, moq_trace/trace_fixture.sh, runs a date publisher and
 # a text subscriber through the relay over loopback.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 if ! command -v moq-trace >/dev/null 2>&1; then
-  echo "moq-trace must be on PATH; run from the moq-trace development shell" >&2
+  echo "moq-trace must be on PATH; run from the moq-workspace development shell" >&2
   exit 1
 fi
 "$here/build.sh" moqrelayserver moqdateserver moqtextclient
