@@ -187,6 +187,13 @@ class StreamPublisherImpl
       std::shared_ptr<DeliveryCallback> deliveryCallback = nullptr,
       std::optional<std::chrono::milliseconds> deliveryTimeout = std::nullopt);
 
+#if defined(MOXYGEN_MOQ_TRACE)
+  // Record how the stream was opened, for the first copy written on it.
+  void setTraceSetup(const moq_trace::StreamSetup& setup) {
+    traceSetup_ = setup;
+  }
+#endif
+
   // SubgroupConsumer overrides
   // Note where the interface uses finSubgroup, this class uses finStream,
   // since it is used for fetch and subgroups
@@ -496,6 +503,8 @@ class StreamPublisherImpl
   void finishTraceCopy(moq_trace_object_outcome outcome);
 
   std::optional<moq_trace::Object> traceCopy_;
+  // How the stream was opened and its header written, for its first copy.
+  std::optional<moq_trace::StreamSetup> traceSetup_;
 #endif
 
   std::shared_ptr<MoQSession::PublisherImpl> publisher_{nullptr};
@@ -1134,6 +1143,7 @@ void StreamPublisherImpl::startTraceCopy(
     uint64_t length,
     moq_trace::CopyWork& copyWork) {
   const auto clone = std::exchange(trace::pendingClone, std::nullopt);
+  const auto setup = std::exchange(traceSetup_, std::nullopt);
   // The previous copy never finished, which validatePublish does not allow.
   finishTraceCopy(MOQ_TRACE_OBJECT_OUTCOME_FAILED);
   const trace::InboundObject* inbound = trace::currentInbound;
@@ -1159,9 +1169,14 @@ void StreamPublisherImpl::startTraceCopy(
   copyWork.begin(startNs);
   // The copy waited from the instant the relay began handing the object to
   // its consumers until its clone. Fan-out is synchronous, so the wait
-  // includes writing the copies of subscribers served before this one.
-  traceCopy_->phase_at(MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT, inbound->readyNs)
-      .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, startNs);
+  // includes writing the copies of subscribers served before this one, and,
+  // for the stream's first copy, opening it, which counts as header work.
+  if (setup) {
+    setup->record(*traceCopy_, inbound->readyNs, startNs);
+  } else {
+    traceCopy_->phase_at(MOQ_TRACE_OBJECT_PHASE_DELIVERY_WAIT, inbound->readyNs)
+        .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, startNs);
+  }
   if (clone) {
     traceCopy_->phase_at(MOQ_TRACE_OBJECT_PHASE_CLONE, clone->startNs)
         .finish_at(MOQ_TRACE_OBJECT_OUTCOME_SUCCESS, clone->endNs);
@@ -2002,7 +2017,17 @@ MoQSession::TrackPublisherImpl::beginSubgroup(
     return folly::makeUnexpected(MoQPublishError(
         MoQPublishError::API_ERROR, "Publish after publishDone"));
   }
+#if defined(MOXYGEN_MOQ_TRACE)
+  // The relay opens a subscriber's stream inside the fan-out of its first
+  // object, so that copy records the setup as header work, not as its wait.
+  const uint64_t traceSetupStartNs =
+      moq_trace_moq_object_phase_enabled() ? quic_trace::now_ns() : 0;
+#endif
   auto stream = wt->createUniStream();
+#if defined(MOXYGEN_MOQ_TRACE)
+  const uint64_t traceOpenEndNs =
+      traceSetupStartNs != 0 ? quic_trace::now_ns() : 0;
+#endif
   if (!stream) {
     // failed to create a stream
     // TODO: can it fail for non-stream credit reasons? Session closing should
@@ -2037,6 +2062,14 @@ MoQSession::TrackPublisherImpl::beginSubgroup(
       logger_,
       deliveryCallback_,
       effectiveTimeout);
+#if defined(MOXYGEN_MOQ_TRACE)
+  if (traceSetupStartNs != 0) {
+    moq_trace::StreamSetup setup;
+    setup.work(traceSetupStartNs, quic_trace::now_ns());
+    setup.transport_call(traceSetupStartNs, traceOpenEndNs);
+    subgroupPublisher->setTraceSetup(setup);
+  }
+#endif
   // TODO: these are currently unused, but the intent might be to reset
   // open subgroups automatically from some path?
   subgroups_[{groupID, subgroupID}] = subgroupPublisher;
