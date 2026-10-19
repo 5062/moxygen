@@ -321,8 +321,10 @@ if(MOXYGEN_MOQ_TRACE)
     find_package(moq_trace CONFIG REQUIRED)
     add_compile_definitions(MOXYGEN_MOQ_TRACE MVFST_MOQ_TRACE)
     link_libraries(moq_trace::cpp)
-    set(MVFST_MOQ_TRACE ON CACHE BOOL "Emit quic_trace transport events" FORCE)
 endif()
+# Follow MOXYGEN_MOQ_TRACE on every configure: a cached ON left by an earlier
+# traced configure would build mvfst with layouts proxygen and moxygen lack.
+set(MVFST_MOQ_TRACE ${MOXYGEN_MOQ_TRACE} CACHE BOOL "Emit quic_trace transport events" FORCE)
 
 FetchContent_GetProperties(mvfst)
 if(NOT mvfst_POPULATED)

@@ -32,7 +32,9 @@ options=(
   -DBUILD_MOQTEST=OFF
 )
 if [ "${TRACE:-1}" = 0 ]; then
-  options+=(-DMOXYGEN_MOQ_TRACE=OFF)
+  # Forget a fork checkout an earlier traced configure cached, so this builds
+  # upstream mvfst.
+  options+=(-DMOXYGEN_MOQ_TRACE=OFF -UFETCHCONTENT_SOURCE_DIR_MVFST)
 else
   if [ -z "${MOQ_TRACE_PREFIX:-}" ]; then
     echo "MOQ_TRACE_PREFIX must name the moq-trace C++ install" >&2
