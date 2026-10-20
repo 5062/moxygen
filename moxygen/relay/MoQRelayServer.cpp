@@ -13,7 +13,9 @@
 #include <folly/init/Init.h>
 #include <folly/io/async/AsyncSignalHandler.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
+#include <quic/logging/FileQLogger.h>
 #include <signal.h>
+#include <cstdlib>
 
 using namespace proxygen;
 
@@ -84,7 +86,30 @@ class RelayServerImpl : public ServerBase {
   std::shared_ptr<MoQRelay> relay_;
 };
 
-using MoQRelayQuicServer = RelayServerImpl<MoQServer>;
+class MoQRelayQuicServer : public RelayServerImpl<MoQServer> {
+ public:
+  using RelayServerImpl<MoQServer>::RelayServerImpl;
+
+  // Streams one qlog per connection into $QLOGDIR when it is set.
+  std::shared_ptr<quic::QLogger> makeQLogger(
+      quic::VantagePoint vantagePoint) override {
+    static const char* directory = std::getenv("QLOGDIR");
+    if (directory == nullptr) {
+      return nullptr;
+    }
+    auto logger = std::make_shared<quic::FileQLogger>(
+        vantagePoint,
+        quic::kHTTP3ProtocolType,
+        directory,
+        false /* prettyJson */,
+        true /* streaming */);
+    // Event times are steady_clock microseconds, which is CLOCK_MONOTONIC on
+    // Linux, so the qlog starts at monotonic zero.
+    logger->title = "moxygen relay monotonic_start_ns=0";
+    return logger;
+  }
+};
+
 using MoQRelayQmuxServer = RelayServerImpl<MoQQmuxServer>;
 
 } // namespace
