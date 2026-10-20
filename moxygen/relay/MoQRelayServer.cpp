@@ -9,11 +9,11 @@
 #include "moxygen/MoQServer.h"
 #include "moxygen/QmuxUtils.h"
 #include "moxygen/relay/MoQRelay.h"
+#include "moxygen/relay/RelayQLogger.h"
 
 #include <folly/init/Init.h>
 #include <folly/io/async/AsyncSignalHandler.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
-#include <quic/logging/FileQLogger.h>
 #include <signal.h>
 #include <cstdlib>
 
@@ -90,24 +90,26 @@ class MoQRelayQuicServer : public RelayServerImpl<MoQServer> {
  public:
   using RelayServerImpl<MoQServer>::RelayServerImpl;
 
-  // Streams one qlog per connection into $QLOGDIR when it is set.
+  // Logs every connection into $QLOGDIR/relay.sqlog when it is set.
   std::shared_ptr<quic::QLogger> makeQLogger(
       quic::VantagePoint vantagePoint) override {
-    static const char* directory = std::getenv("QLOGDIR");
+    if (!qlogSink_) {
+      return nullptr;
+    }
+    return std::make_shared<RelayQLogger>(vantagePoint, qlogSink_);
+  }
+
+ private:
+  static std::shared_ptr<RelayQLogSink> openQLog() {
+    const char* directory = std::getenv("QLOGDIR");
     if (directory == nullptr) {
       return nullptr;
     }
-    auto logger = std::make_shared<quic::FileQLogger>(
-        vantagePoint,
-        quic::kHTTP3ProtocolType,
-        directory,
-        false /* prettyJson */,
-        true /* streaming */);
-    // Event times are steady_clock microseconds, which is CLOCK_MONOTONIC on
-    // Linux, so the qlog starts at monotonic zero.
-    logger->title = "moxygen relay monotonic_start_ns=0";
-    return logger;
+    return std::make_shared<RelayQLogSink>(
+        std::string(directory) + "/relay.sqlog");
   }
+
+  std::shared_ptr<RelayQLogSink> qlogSink_ = openQLog();
 };
 
 using MoQRelayQmuxServer = RelayServerImpl<MoQQmuxServer>;

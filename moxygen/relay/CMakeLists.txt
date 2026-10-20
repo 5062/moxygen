@@ -76,7 +76,6 @@ target_link_libraries(
   moxygen_moq_server
   moxygen_moq_qmux_server
   moxygen_qmux_utils
-  mvfst::mvfst_logging_file_qlogger
   Folly::folly_init_init
   Folly::folly_io_async_async_signal_handler
 )
